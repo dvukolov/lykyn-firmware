@@ -1,0 +1,12 @@
+.esphome/
+.venv/
+secrets.yaml
+*.log
+build/
+*.bak
+dist/
+*.factory.bin
+*.ota.bin
+build.log
+build-public.log
+build.done

@@ -1,0 +1,580 @@
+# Shroom Labs native firmware for the Lykyn mushroom chamber (ESP32-C3, 4MB).
+# Pin map recovered from the stock 0.17.0 app image. See docs/PINMAP.md.
+
+substitutions:
+  name: lykyn
+  friendly_name: Lykyn
+  # Colour order of the 16 pixel grow ring. GRB is the WS2812B default.
+  # Run the "LED Test" button after the first flash to confirm (red, green, blue, white).
+  led_order: GRB
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.10.0
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          // Fans and mister start OFF. The controller turns them on once it has a good reading.
+          id(fan_in_pwm).set_level(0.0f);
+          id(fan_out_pwm).set_level(0.0f);
+
+esp32:
+  variant: esp32c3
+  board: esp32-c3-devkitm-1
+  flash_size: 4MB
+  partitions: partitions.csv
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+improv_serial:
+
+captive_portal:
+
+mdns:
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/Los_Angeles
+
+i2c:
+  id: bus_a
+  sda: GPIO4
+  scl: GPIO5
+  scan: true
+  frequency: 100kHz
+
+globals:
+  - id: last_good_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: hum_demand
+    type: bool
+    initial_value: 'false'
+  - id: hum_on_run_s
+    type: int
+    initial_value: '0'
+  - id: hum_rest_s
+    type: int
+    initial_value: '0'
+  - id: mist_tick
+    type: int
+    initial_value: '0'
+  - id: manual_hum
+    type: bool
+    initial_value: 'false'
+  - id: fan_cycle_s
+    type: int
+    initial_value: '0'
+  - id: fan_boost
+    type: bool
+    initial_value: 'false'
+  - id: led_test_step
+    type: int
+    initial_value: '0'
+  - id: fan_in_level_pct
+    type: float
+    initial_value: '0'
+  - id: fan_out_level_pct
+    type: float
+    initial_value: '0'
+  - id: last_status_rgb
+    type: int
+    initial_value: '-1'
+
+sensor:
+  - platform: sht3xd
+    address: 0x44
+    i2c_id: bus_a
+    update_interval: 5s
+    temperature:
+      id: current_temperature
+      name: "Current Temperature"
+      on_value:
+        - lambda: 'if (!isnan(x)) id(last_good_ms) = millis();'
+    humidity:
+      id: current_humidity
+      name: "Current Humidity"
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
+  - platform: template
+    id: air_exchange_fan_speed
+    name: "Current Air Exchange Fan Speed"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: 'return id(fan_in_level_pct);'
+
+# Stock hardware: GPIO0 and GPIO6 are driven HIGH at boot and never changed by the
+# stock firmware. Function unknown (see docs/PINMAP.md). We match stock.
+switch:
+  - platform: gpio
+    pin: GPIO0
+    id: aux_gpio0_high
+    internal: true
+    restore_mode: ALWAYS_ON
+  - platform: gpio
+    pin: GPIO6
+    id: aux_gpio6_high
+    internal: true
+    restore_mode: ALWAYS_ON
+  # Ultrasonic mister driver. Plain on/off at the MCU (stock firmware uses digitalWrite,
+  # no PWM). Mist level is set by pulsing it (time proportional).
+  - platform: gpio
+    pin: GPIO10
+    id: mister_relay
+    internal: true
+    restore_mode: ALWAYS_OFF
+  - platform: template
+    id: humidifier_manual
+    name: "Humidifier"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: 'id(manual_hum) = true;'
+    turn_off_action:
+      - lambda: 'id(manual_hum) = false;'
+  - platform: template
+    id: light_enabled
+    name: "Light Enabled"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+output:
+  # Stock uses analogWrite (LEDC, 8-bit) on GPIO3 (inlet) and GPIO1 (outlet).
+  - platform: ledc
+    pin: GPIO3
+    id: fan_in_pwm
+    frequency: 1000Hz
+  - platform: ledc
+    pin: GPIO1
+    id: fan_out_pwm
+    frequency: 1000Hz
+
+light:
+  # 16 pixel WS2812B ring, data on GPIO7 (stock: FastLED RMT, timings 250/625/375 ns).
+  - platform: esp32_rmt_led_strip
+    id: grow_light
+    name: "Grow Light"
+    pin: GPIO7
+    num_leds: 16
+    chipset: WS2812
+    rgb_order: ${led_order}
+    default_transition_length: 0s
+  # Single status pixel, GPIO2 (stock: one Adafruit NeoPixel, RGB order).
+  - platform: esp32_rmt_led_strip
+    id: status_pixel
+    name: "Status Pixel"
+    pin: GPIO2
+    num_leds: 1
+    chipset: WS2812
+    rgb_order: RGB
+    default_transition_length: 0s
+    internal: true
+
+select:
+  - platform: template
+    id: control_mode
+    name: "Control Mode"
+    options: ["SMART", "MANUAL", "OFF"]
+    initial_option: "SMART"
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: stage
+    name: "Stage"
+    options: ["Fruiting", "Pinning", "Colonization", "Custom"]
+    initial_option: "Fruiting"
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            // Black Oyster (Pleurotus ostreatus). Fruiting band is the stock Lykyn
+            // OysterBlackPearl band (15-21 C, 85-92% RH). Pinning and colonization
+            // follow the shroomlabs.io black-oyster profile.
+            struct S { float t, tt, h, ht; float fan_min, fan_s, fan_pct; float light_h, white, blue, mist; };
+            S p;
+            if (x == "Fruiting")          p = {18, 3, 88.5, 3.5, 10, 40, 50, 12, 20, 80, 75};
+            else if (x == "Pinning")      p = {17, 3, 92.0, 3.0, 12, 35, 40, 12, 20, 80, 75};
+            else if (x == "Colonization") p = {24, 4, 90.0, 4.0, 60, 15, 20, 0, 0, 0, 75};
+            else return;
+            auto setn = [](number::Number *n, float v) { auto c = n->make_call(); c.set_value(v); c.perform(); };
+            setn(id(temperature_target), p.t);
+            setn(id(temperature_tolerance), p.tt);
+            setn(id(target_humidity), p.h);
+            setn(id(humidity_tolerance), p.ht);
+            setn(id(fan_period_min), p.fan_min);
+            setn(id(fan_run_s), p.fan_s);
+            setn(id(fan_speed_pct), p.fan_pct);
+            setn(id(light_hours), p.light_h);
+            setn(id(light_white_pct), p.white);
+            setn(id(light_blue_pct), p.blue);
+            setn(id(mist_level), p.mist);
+
+number:
+  - platform: template
+    id: target_humidity
+    name: "Target Humidity"
+    unit_of_measurement: "%"
+    min_value: 30
+    max_value: 95
+    step: 0.5
+    initial_value: 88.5
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: humidity_tolerance
+    name: "Humidity Tolerance"
+    unit_of_measurement: "%"
+    min_value: 1
+    max_value: 15
+    step: 0.5
+    initial_value: 3.5
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: temperature_target
+    name: "Temperature Target"
+    unit_of_measurement: "°C"
+    min_value: 5
+    max_value: 35
+    step: 0.5
+    initial_value: 18
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: temperature_tolerance
+    name: "Temperature Tolerance"
+    unit_of_measurement: "°C"
+    min_value: 0.5
+    max_value: 10
+    step: 0.5
+    initial_value: 3
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: mist_level
+    name: "Mist Level"
+    unit_of_measurement: "%"
+    min_value: 10
+    max_value: 100
+    step: 5
+    initial_value: 75
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: fan_period_min
+    name: "Air Exchange Every"
+    unit_of_measurement: "min"
+    min_value: 1
+    max_value: 240
+    step: 1
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: fan_run_s
+    name: "Air Exchange Run"
+    unit_of_measurement: "s"
+    min_value: 5
+    max_value: 600
+    step: 5
+    initial_value: 40
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: fan_speed_pct
+    name: "Air Exchange Fan Speed"
+    unit_of_measurement: "%"
+    min_value: 33
+    max_value: 100
+    step: 1
+    initial_value: 50
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: manual_fan_in
+    name: "Inlet Fan Manual"
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 0
+    optimistic: true
+  - platform: template
+    id: manual_fan_out
+    name: "Outlet Fan Manual"
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 0
+    optimistic: true
+  - platform: template
+    id: sunrise_hour
+    name: "Light Sunrise Hour"
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 8
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: light_hours
+    name: "Light Hours"
+    unit_of_measurement: "h"
+    min_value: 0
+    max_value: 24
+    step: 1
+    initial_value: 12
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: light_brightness
+    name: "Light Brightness"
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 60
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: light_white_pct
+    name: "Light White"
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 20
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: light_red_pct
+    name: "Light Red"
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: light_green_pct
+    name: "Light Green"
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: light_blue_pct
+    name: "Light Blue"
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 80
+    optimistic: true
+    restore_value: true
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: ip_address
+      name: "IP Address"
+    ssid:
+      id: wifi_ssid
+      name: "WiFi SSID"
+  - platform: template
+    id: humidifier_status
+    name: "Humidifier Status"
+  - platform: template
+    id: air_exchange_status
+    name: "Air Exchange Status"
+  - platform: template
+    id: light_status
+    name: "Light Status"
+  - platform: template
+    id: active_alerts
+    name: "Active Alerts"
+  - platform: template
+    id: status_json
+    name: "Status JSON"
+
+button:
+  - platform: restart
+    name: "Restart"
+    entity_category: config
+  - platform: template
+    name: "LED Test"
+    on_press:
+      - script.execute: led_test
+
+
+script:
+  - id: led_test
+    mode: single
+    then:
+      - light.turn_on: {id: grow_light, red: 100%, green: 0%, blue: 0%, brightness: 30%}
+      - delay: 2s
+      - light.turn_on: {id: grow_light, red: 0%, green: 100%, blue: 0%, brightness: 30%}
+      - delay: 2s
+      - light.turn_on: {id: grow_light, red: 0%, green: 0%, blue: 100%, brightness: 30%}
+      - delay: 2s
+      - light.turn_on: {id: grow_light, red: 100%, green: 100%, blue: 100%, brightness: 30%}
+      - delay: 2s
+      - light.turn_off: grow_light
+
+interval:
+  # Climate loop, once a second. Runs locally, no cloud needed.
+  - interval: 1s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const float rh = id(current_humidity).state;
+          const float t = id(current_temperature).state;
+          const bool fresh = (now - id(last_good_ms)) < 60000 && !isnan(rh) && !isnan(t);
+          const bool smart = id(control_mode).current_option() == "SMART";
+          const bool manual = id(control_mode).current_option() == "MANUAL";
+          const float hum_t = id(target_humidity).state;
+          const float hum_tol = id(humidity_tolerance).state;
+          const float hmin = hum_t - hum_tol, hmax = hum_t + hum_tol;
+          const float tt = id(temperature_target).state, ttol = id(temperature_tolerance).state;
+          const float tmin = tt - ttol, tmax = tt + ttol;
+          const float HARD_RH = 95.0f;   // absolute stop, whatever the setpoints say
+          bool want_hum = false;
+          float fan_in = 0.0f, fan_out = 0.0f;
+          std::string alerts;
+
+          if (!fresh) {
+            alerts = "sensor";
+            if (smart || manual) { fan_in = 0.33f; fan_out = 0.33f; }  // keep some air moving
+            id(hum_demand) = false;
+          } else if (smart) {
+            if (rh < hmin) id(hum_demand) = true;
+            else if (rh >= hum_t) id(hum_demand) = false;
+            want_hum = id(hum_demand);
+            const int period_s = (int) (id(fan_period_min).state * 60.0f);
+            id(fan_cycle_s) = (id(fan_cycle_s) + 1) % (period_s > 0 ? period_s : 600);
+            const bool run = id(fan_cycle_s) < (int) id(fan_run_s).state;
+            if (rh > hmax || t > tmax) id(fan_boost) = true;
+            else if (rh < hmax - 1.0f && t < tmax - 0.5f) id(fan_boost) = false;
+            float level = id(fan_boost) ? 1.0f : (run ? id(fan_speed_pct).state / 100.0f : 0.0f);
+            fan_in = fan_out = level;
+            if (level > 0.0f && rh >= hmin) want_hum = false;   // do not mist against the exchange fans
+          } else if (manual) {
+            want_hum = id(manual_hum);
+            fan_in = id(manual_fan_in).state / 100.0f;
+            fan_out = id(manual_fan_out).state / 100.0f;
+            if (fan_in > 0.0f && fan_in < 0.33f) fan_in = 0.33f;
+            if (fan_out > 0.0f && fan_out < 0.33f) fan_out = 0.33f;
+          } else {
+            id(hum_demand) = false;
+          }
+
+          if (fresh) {
+            if (rh >= hmax && smart) { want_hum = false; id(hum_demand) = false; }
+            if (rh >= HARD_RH) { want_hum = false; id(hum_demand) = false; }
+            if (rh < hmin) alerts += "rh_low,";
+            if (rh > hmax) alerts += "rh_high,";
+            if (t < tmin) alerts += "temp_low,";
+            if (t > tmax) alerts += "temp_high,";
+          }
+
+          // Mister safety: at most 120 s of demand, then 30 s rest (stock does the same).
+          if (id(hum_rest_s) > 0) { want_hum = false; id(hum_rest_s)--; }
+          else if (want_hum) {
+            if (++id(hum_on_run_s) >= 120) { id(hum_rest_s) = 30; id(hum_on_run_s) = 0; want_hum = false; }
+          } else id(hum_on_run_s) = 0;
+
+          // Mist level: time-proportional pulses in a 10 s window.
+          id(mist_tick) = (id(mist_tick) + 1) % 10;
+          const int on_s = (int) ceilf(10.0f * id(mist_level).state / 100.0f);
+          const bool pulse = want_hum && id(mist_tick) < on_s;
+          if (pulse != id(mister_relay).state) { if (pulse) id(mister_relay).turn_on(); else id(mister_relay).turn_off(); }
+
+          id(fan_in_pwm).set_level(fan_in);
+          id(fan_out_pwm).set_level(fan_out);
+          id(fan_in_level_pct) = fan_in * 100.0f;
+          id(fan_out_level_pct) = fan_out * 100.0f;
+
+          auto pub = [](text_sensor::TextSensor *ts, const std::string &v) { if (ts->state != v) ts->publish_state(v); };
+          pub(id(humidifier_status), pulse ? "ON" : (id(hum_rest_s) > 0 ? "REST" : (want_hum ? "WAIT" : "OFF")));
+          pub(id(air_exchange_status), fan_in > 0.0f ? (id(fan_boost) ? "BOOST" : "ON") : "OFF");
+          pub(id(active_alerts), alerts.empty() ? "none" : alerts);
+
+  # Grow light schedule. Turn off "Light Enabled" to drive the ring by hand.
+  - interval: 20s
+    then:
+      - lambda: |-
+          if (!id(light_enabled).state) { id(light_status).publish_state("MANUAL"); return; }
+          auto tm = id(sntp_time).now();
+          if (!tm.is_valid()) return;
+          const int h = tm.hour;
+          const int sr = (int) id(sunrise_hour).state;
+          const int dur = (int) id(light_hours).state;
+          const bool on = dur >= 24 || (dur > 0 && ((h - sr + 24) % 24) < dur);
+          if (on) {
+            const float w = id(light_white_pct).state;
+            auto clamp01 = [](float v) { return v < 0 ? 0.0f : (v > 1 ? 1.0f : v); };
+            auto call = id(grow_light).turn_on();
+            call.set_rgb(clamp01((id(light_red_pct).state + w) / 100.0f),
+                         clamp01((id(light_green_pct).state + w) / 100.0f),
+                         clamp01((id(light_blue_pct).state + w) / 100.0f));
+            call.set_brightness(id(light_brightness).state / 100.0f);
+            call.set_transition_length(0);
+            call.perform();
+          } else {
+            id(grow_light).turn_off().set_transition_length(0).perform();
+          }
+          const std::string st = on ? "ON" : "OFF";
+          if (id(light_status).state != st) id(light_status).publish_state(st);
+
+  # Status pixel: green ok, amber no wifi, red no sensor.
+  - interval: 3s
+    then:
+      - lambda: |-
+          const bool fresh = (millis() - id(last_good_ms)) < 60000;
+          const bool wifi_ok = wifi::global_wifi_component->is_connected();
+          int code = !fresh ? 1 : (!wifi_ok ? 2 : 3);
+          if (code == id(last_status_rgb)) return;
+          id(last_status_rgb) = code;
+          auto call = id(status_pixel).turn_on();
+          if (code == 1) call.set_rgb(1.0f, 0.0f, 0.0f);
+          else if (code == 2) call.set_rgb(1.0f, 0.5f, 0.0f);
+          else call.set_rgb(0.0f, 1.0f, 0.0f);
+          call.set_brightness(0.08f);
+          call.set_transition_length(0);
+          call.perform();
+
+  # One-blob JSON for the LAN API: GET /text_sensor/status_json
+  - interval: 5s
+    then:
+      - lambda: |-
+          char buf[420];
+          snprintf(buf, sizeof(buf),
+            "{\"temperature_c\":%.2f,\"humidity_pct\":%.2f,\"humidifier\":\"%s\",\"fan_in_pct\":%.0f,\"fan_out_pct\":%.0f,"
+            "\"mode\":\"%s\",\"stage\":\"%s\",\"target_humidity\":%.1f,\"humidity_tolerance\":%.1f,"
+            "\"temperature_target\":%.1f,\"temperature_tolerance\":%.1f,\"light\":\"%s\",\"alerts\":\"%s\",\"uptime_s\":%u}",
+            id(current_temperature).state, id(current_humidity).state,
+            id(humidifier_status).state.c_str(), id(fan_in_level_pct), id(fan_out_level_pct),
+            std::string(id(control_mode).current_option()).c_str(), std::string(id(stage).current_option()).c_str(),
+            id(target_humidity).state, id(humidity_tolerance).state,
+            id(temperature_target).state, id(temperature_tolerance).state,
+            id(light_status).state.c_str(), id(active_alerts).state.c_str(), (unsigned) (millis() / 1000));
+          id(status_json).publish_state(buf);
