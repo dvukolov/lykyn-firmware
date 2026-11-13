@@ -171,6 +171,7 @@ light:
     num_leds: 16
     chipset: WS2812
     rgb_order: ${led_order}
+    rmt_symbols: 48   # C3 has 2 TX channels with 48 symbols each; default 96 takes both
     default_transition_length: 0s
   # Single status pixel, GPIO2 (stock: one Adafruit NeoPixel, RGB order).
   - platform: esp32_rmt_led_strip
@@ -180,6 +181,7 @@ light:
     num_leds: 1
     chipset: WS2812
     rgb_order: RGB
+    rmt_symbols: 48
     default_transition_length: 0s
     internal: true
 
