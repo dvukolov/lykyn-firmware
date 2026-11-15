@@ -258,27 +258,46 @@ select:
     on_value:
       then:
         - lambda: |-
-            // Black Oyster (Pleurotus ostreatus). Fruiting band is the stock Lykyn
-            // OysterBlackPearl band (15-21 C, 85-92% RH). Pinning and colonization
-            // follow the shroomlabs.io black-oyster profile.
-            struct S { float t, tt, h, ht; float fan_min, fan_s, fan_pct; float light_h, white, blue, mist; };
-            S p;
-            if (x == "Fruiting")          p = {18, 3, 88.5, 3.5, 10, 40, 50, 12, 20, 80, 75};
-            else if (x == "Pinning")      p = {17, 3, 92.0, 3.0, 12, 35, 40, 12, 20, 80, 75};
-            else if (x == "Colonization") p = {24, 4, 90.0, 4.0, 60, 15, 20, 0, 0, 0, 75};
-            else return;
+            // A linked profile's stage knobs win. Built-in Black Oyster numbers are
+            // used only when no profile is set. Always set red and green so a leftover
+            // color does not stay on. Fan 20 clamps to this chamber's 33 percent floor.
             auto setn = [](number::Number *n, float v) { auto c = n->make_call(); c.set_value(v); c.perform(); };
-            setn(id(temperature_target), p.t);
-            setn(id(temperature_tolerance), p.tt);
-            setn(id(target_humidity), p.h);
-            setn(id(humidity_tolerance), p.ht);
-            setn(id(fan_period_min), p.fan_min);
-            setn(id(fan_run_s), p.fan_s);
-            setn(id(fan_speed_pct), p.fan_pct);
-            setn(id(light_hours), p.light_h);
-            setn(id(light_white_pct), p.white);
-            setn(id(light_blue_pct), p.blue);
-            setn(id(mist_level), p.mist);
+            auto apply = [&](float t, float tt, float h, float ht, float fan_min, float fan_s, float fan_pct,
+                             float light_h, float white, float red, float green, float blue, float mist) {
+              setn(id(temperature_target), t);
+              setn(id(temperature_tolerance), tt);
+              setn(id(target_humidity), h);
+              setn(id(humidity_tolerance), ht);
+              setn(id(fan_period_min), fan_min);
+              setn(id(fan_run_s), fan_s);
+              setn(id(fan_speed_pct), fan_pct);
+              setn(id(light_hours), light_h);
+              setn(id(light_white_pct), white);
+              setn(id(light_red_pct), red);
+              setn(id(light_green_pct), green);
+              setn(id(light_blue_pct), blue);
+              setn(id(mist_level), mist);
+            };
+            esphome::shroom_labs::StageRecipe r;
+            if (id(shl_cloud).stage_recipe(x.c_str(), &r)) {
+              apply(r.temperature_c,
+                    (r.mask & (1u << 2)) ? r.temperature_hysteresis : 4,
+                    r.humidity_percent,
+                    (r.mask & (1u << 3)) ? r.humidity_hysteresis : 4,
+                    r.air_exchange_period_min,
+                    r.air_exchange_run_sec,
+                    r.fan_speed_percent,
+                    r.light_hours,
+                    r.white_percent,
+                    r.red_percent,
+                    r.green_percent,
+                    r.blue_percent,
+                    (r.mask & (1u << 13)) ? r.humidifier_speed_percent : 75);
+              return;
+            }
+            if (x == "Fruiting")          apply(18, 3, 88.5, 3.5, 10, 40, 50, 12, 20, 0, 0, 80, 75);
+            else if (x == "Pinning")      apply(17, 3, 92.0, 3.0, 12, 35, 40, 12, 20, 0, 0, 80, 75);
+            else if (x == "Colonization") apply(24, 4, 90.0, 4.0, 60, 15, 20, 0, 0, 0, 0, 0, 75);
 
 number:
   - platform: template
