@@ -10,3 +10,11 @@ dist/
 build.log
 build-public.log
 build.done
+webapp/node_modules/
+webapp/out/
+webapp/.next/
+external_components/lykyn_dashboard/static_files.h
+external_components/lykyn_dashboard/static_files.cpp
+
+__pycache__/
+*.pyc

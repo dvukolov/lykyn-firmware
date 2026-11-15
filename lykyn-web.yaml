@@ -1,0 +1,52 @@
+# Shared on-device dashboard (served at /) and preferred Shroom Labs cloud link (on by default).
+# The stock ESPHome entity table is at /esp. The including file still sets web_server auth, port, and OTA.
+
+lykyn_dashboard:
+
+shroom_labs_cloud:
+  id: shl_cloud
+  api_host: api.shroomlabs.io
+  site_origin: https://shroomlabs.io
+  enabled: true
+  device_type: lykyn_chamber
+  model: Lykyn
+  knobs:
+    air_exchange_speed: fan_speed_pct
+    air_exchange_period_min: fan_period_min
+    air_exchange_run_sec: fan_run_s
+    sunrise_hour: sunrise_hour
+    light_hours: light_hours
+    white_intensity: light_white_pct
+    color_r: light_red_pct
+    color_g: light_green_pct
+    color_b: light_blue_pct
+  grow_phase: stage
+
+web_server:
+  css_include: assets/esphome.css
+  js_include: assets/esphome.js
+  sorting_groups:
+    - id: grp_air
+      name: "Air Exchange"
+      sorting_weight: 10
+    - id: grp_humidity
+      name: "Humidity"
+      sorting_weight: 20
+    - id: grp_temperature
+      name: "Temperature"
+      sorting_weight: 25
+    - id: grp_lights
+      name: "Lights"
+      sorting_weight: 30
+    - id: grp_env
+      name: "Environment"
+      sorting_weight: 40
+    - id: grp_system
+      name: "System"
+      sorting_weight: 50
+    - id: grp_extras
+      name: "Extras"
+      sorting_weight: 100
+    - id: grp_hidden
+      name: "Internal controls (should be hidden)"
+      sorting_weight: 1000

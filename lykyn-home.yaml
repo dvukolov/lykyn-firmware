@@ -1,6 +1,14 @@
+
+external_components:
+  - source:
+      type: local
+      path: external_components
+    components: [shroom_labs_cloud, lykyn_dashboard]
+
 # Build with your own WiFi baked in. Uses secrets.yaml (git ignored).
 packages:
   core: !include lykyn-core.yaml
+  web: !include lykyn-web.yaml
 
 wifi:
   ssid: !secret wifi_ssid

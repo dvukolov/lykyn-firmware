@@ -1,7 +1,7 @@
 # lykyn-firmware
 
 Native Shroom Labs firmware for the Lykyn mushroom chamber (ESP32-C3, 4 MB). Built with ESPHome.
-Status: compiled, **not yet flashed on a real unit**. Read `docs/FLASH.md` and `docs/PROBE_PLAN.md` first.
+Status: running on a real Lykyn. The on-device dashboard is the default page at `/`. The stock ESPHome entity table is at `/esp`.
 
 What it does:
 
@@ -39,23 +39,45 @@ passwords from `secrets.yaml`.
 Basic auth on the private builds. Examples:
 
 ```
-curl -u shroom:PASSWORD http://lykyn.local/text_sensor/status_json
-curl -u shroom:PASSWORD http://lykyn.local/sensor/current_humidity
-curl -u shroom:PASSWORD -X POST "http://lykyn.local/number/target_humidity/set?value=90"
-curl -u shroom:PASSWORD -X POST "http://lykyn.local/select/stage/set?option=Pinning"
-curl -u shroom:PASSWORD -X POST "http://lykyn.local/select/control_mode/set?option=MANUAL"
-curl -u shroom:PASSWORD -X POST http://lykyn.local/switch/humidifier/turn_on
+curl -u shroom:PASSWORD http://lykyn.local/text_sensor/Status%20JSON
+curl -u shroom:PASSWORD http://lykyn.local/sensor/Current%20Humidity
+curl -u shroom:PASSWORD -X POST "http://lykyn.local/number/Target%20Humidity/set?value=90"
+curl -u shroom:PASSWORD -X POST "http://lykyn.local/select/Stage/set?option=Pinning"
+curl -u shroom:PASSWORD -X POST "http://lykyn.local/select/Control%20Mode/set?option=MANUAL"
+curl -u shroom:PASSWORD -X POST http://lykyn.local/switch/Humidifier/turn_on
 ```
 
-Entity ids the hub already knows: `current_temperature`, `current_humidity`, `target_humidity`,
-`temperature_target`, `humidifier_status`, `air_exchange_status`, `light_status`, `active_alerts`, `ip_address`, `wifi_ssid`.
+ESPHome 2026.10 identifies entities by their display name, not the YAML id. The dashboard maps those
+names back to the same ids the OpenShrooly hub already knows: `current_temperature`, `current_humidity`,
+`target_humidity`, `temperature_target`, `humidifier_status`, `air_exchange_status`, `light_status`,
+`active_alerts`, `ip_address`, `wifi_ssid`.
+
+## On-device dashboard
+
+After Wi-Fi is up, open `http://<chamber-ip>/`. That page is the same Shroom Labs dashboard the
+Shrooly uses: gauges, grouped controls, and a Shroom Labs cloud link that is on by default. The stock ESPHome entity table
+is at `/esp` (also `/entities`).
+
+To rebuild the dashboard into the firmware:
+
+```
+scripts/build-webapp.sh
+.venv/bin/esphome compile lykyn-home.yaml
+```
 
 ## Shroom Labs link
 
-Today this is the same path the OpenShrooly chambers use: the hub polls the LAN REST API and syncs to
-shroomlabs.io. The outbound cloud client (`shroom_labs_cloud` with claim code and signed telemetry) is a stub in the
-openshrooly repo, so it is not built here yet. Coach profiles reach the unit by writing the numbers and
-selects above.
+Two paths, the same as a Shrooly:
+
+- The local hub can still poll the LAN REST API and sync to shroomlabs.io.
+- The chamber itself also opens an outbound link. Cloud is on by default: on boot it enrolls at
+  `api.shroomlabs.io` and shows a 6-character claim code and a QR for
+  `https://shroomlabs.io/claim.html?code=...`. After you claim it on the site, the chamber fetches a
+  client certificate and talks to `api.shroomlabs.io`. You can still turn Connect to Shroom Labs
+  off in Settings. A cloud failure does not change the local climate loop.
+
+Coach profiles reach the unit by writing the numbers and selects above, or through the inbox once
+the chamber is linked.
 
 ## Safety clamps
 
@@ -69,4 +91,3 @@ selects above.
 
 - Colour order of the ring is assumed GRB until the LED Test button says otherwise.
 - GPIO0 and GPIO6 purpose unknown. Held HIGH like stock.
-- No on-device test yet.

@@ -1,7 +1,15 @@
+
+external_components:
+  - source:
+      type: local
+      path: external_components
+    components: [shroom_labs_cloud, lykyn_dashboard]
+
 # First-flash build. No WiFi credentials inside. After flashing, the Lykyn opens
 # a "lykyn" setup network (captive portal), and Improv over USB also works.
 packages:
   core: !include lykyn-core.yaml
+  web: !include lykyn-web.yaml
 
 wifi:
   ap:

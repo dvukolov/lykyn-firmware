@@ -1,8 +1,16 @@
+
+external_components:
+  - source:
+      type: local
+      path: external_components
+    components: [shroom_labs_cloud, lykyn_dashboard]
+
 # Public installer build. No secrets inside, safe to host. The web UI and OTA have
 # no password, so this unit trusts everything on your LAN, the same as the stock
 # OpenShrooly chamber. Use lykyn-provision.yaml or lykyn-home.yaml to add passwords.
 packages:
   core: !include lykyn-core.yaml
+  web: !include lykyn-web.yaml
 
 wifi:
   ap:
