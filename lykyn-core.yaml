@@ -296,8 +296,9 @@ select:
             // A linked profile's stage knobs win. Built-in Black Oyster numbers are
             // used only when no profile is set. Always set red and green so a leftover
             // color does not stay on. Fan 20 clamps to this chamber's 33 percent floor.
-            // Built-in fallback light is percent of the full ring at master brightness 100: white 12
-            // and blue 48 are the same light the old white 20 and blue 80 made at brightness 60.
+            // Built-in fallback light follows the shroomlabs.io black-oyster profile: 92 lux of white
+            // and blue 80. White is 23 percent of the full ring on an ESTIMATE of 400 lux at 100
+            // percent (not measured), the same number the site sends. Replace when real readings exist.
             auto setn = [](number::Number *n, float v) { auto c = n->make_call(); c.set_value(v); c.perform(); };
             auto apply = [&](float t, float tt, float h, float ht, float fan_min, float fan_s, float fan_pct,
                              float light_h, float white, float red, float green, float blue, float mist) {
@@ -332,8 +333,8 @@ select:
                     (r.mask & (1u << 13)) ? r.humidifier_speed_percent : 75);
               return;
             }
-            if (x == "Fruiting")          apply(18, 3, 88.5, 3.5, 10, 40, 50, 12, 12, 0, 0, 48, 75);
-            else if (x == "Pinning")      apply(17, 3, 92.0, 3.0, 12, 35, 40, 12, 12, 0, 0, 48, 75);
+            if (x == "Fruiting")          apply(18, 3, 88.5, 3.5, 10, 40, 50, 12, 23, 0, 0, 80, 75);
+            else if (x == "Pinning")      apply(17, 3, 92.0, 3.0, 12, 35, 40, 12, 23, 0, 0, 80, 75);
             else if (x == "Colonization") apply(24, 4, 90.0, 4.0, 60, 15, 20, 0, 0, 0, 0, 0, 75);
 
 number:
@@ -519,7 +520,7 @@ number:
     min_value: 0
     max_value: 100
     step: 0.1
-    initial_value: 12
+    initial_value: 2.3
     optimistic: true
     restore_value: true
     on_value:
@@ -564,7 +565,7 @@ number:
     min_value: 0
     max_value: 100
     step: 0.1
-    initial_value: 48
+    initial_value: 80
     optimistic: true
     restore_value: true
     on_value:
