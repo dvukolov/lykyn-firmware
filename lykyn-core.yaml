@@ -436,7 +436,7 @@ number:
       sorting_group_id: grp_air
       sorting_weight: 40
     unit_of_measurement: "%"
-    min_value: 33
+    min_value: 0
     max_value: 100
     step: 1
     initial_value: 50
@@ -715,13 +715,16 @@ interval:
           const float tt = id(temperature_target).state, ttol = id(temperature_tolerance).state;
           const float tmin = tt - ttol, tmax = tt + ttol;
           const float HARD_RH = 95.0f;   // absolute stop, whatever the setpoints say
+          // Unmeasured stall floor. Stock firmware's first of four levels was 33%.
+          // 0 is always off. Values above 0 are lifted to this duty until we measure the real floor.
+          const float FAN_STALL_DUTY = 0.33f;
           bool want_hum = false;
           float fan_in = 0.0f, fan_out = 0.0f;
           std::string alerts;
 
           if (!fresh) {
             alerts = "sensor";
-            if (smart || manual) { fan_in = 0.33f; fan_out = 0.33f; }  // keep some air moving
+            if (smart || manual) { fan_in = FAN_STALL_DUTY; fan_out = FAN_STALL_DUTY; }  // keep some air moving
             id(hum_demand) = false;
           } else if (smart) {
             if (rh < hmin) id(hum_demand) = true;
@@ -739,8 +742,8 @@ interval:
             want_hum = id(manual_hum);
             fan_in = id(manual_fan_in).state / 100.0f;
             fan_out = id(manual_fan_out).state / 100.0f;
-            if (fan_in > 0.0f && fan_in < 0.33f) fan_in = 0.33f;
-            if (fan_out > 0.0f && fan_out < 0.33f) fan_out = 0.33f;
+            if (fan_in > 0.0f && fan_in < FAN_STALL_DUTY) fan_in = FAN_STALL_DUTY;
+            if (fan_out > 0.0f && fan_out < FAN_STALL_DUTY) fan_out = FAN_STALL_DUTY;
           } else {
             id(hum_demand) = false;
           }
