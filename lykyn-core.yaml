@@ -98,6 +98,12 @@ globals:
   - id: hum_demand
     type: bool
     initial_value: 'false'
+  # Set true after the first good humidity sample in SMART. Demand starts false
+  # in RAM, so without this a reboot with RH already in the hysteresis dead
+  # zone (below target, still at or above target minus tolerance) never arms.
+  - id: hum_ready
+    type: bool
+    initial_value: 'false'
   - id: hum_on_run_s
     type: int
     initial_value: '0'
@@ -361,7 +367,7 @@ number:
     min_value: 1
     max_value: 15
     step: 0.5
-    initial_value: 3.5
+    initial_value: 2.0
     optimistic: true
     restore_value: true
   - platform: template
@@ -726,7 +732,12 @@ interval:
             alerts = "sensor";
             if (smart || manual) { fan_in = FAN_STALL_DUTY; fan_out = FAN_STALL_DUTY; }  // keep some air moving
             id(hum_demand) = false;
+            id(hum_ready) = false;
           } else if (smart) {
+            if (!id(hum_ready)) {
+              id(hum_ready) = true;
+              if (rh < hum_t) id(hum_demand) = true;
+            }
             if (rh < hmin) id(hum_demand) = true;
             else if (rh >= hum_t) id(hum_demand) = false;
             want_hum = id(hum_demand);
@@ -736,6 +747,8 @@ interval:
             if (rh > hmax || t > tmax) id(fan_boost) = true;
             else if (rh < hmax - 1.0f && t < tmax - 0.5f) id(fan_boost) = false;
             float level = id(fan_boost) ? 1.0f : (run ? id(fan_speed_pct).state / 100.0f : 0.0f);
+            // Same stall lift as MANUAL: a running SMART fan below 33% does not spin.
+            if (level > 0.0f && level < FAN_STALL_DUTY) level = FAN_STALL_DUTY;
             fan_in = fan_out = level;
             if (level > 0.0f && rh >= hmin) want_hum = false;   // do not mist against the exchange fans
           } else if (manual) {
