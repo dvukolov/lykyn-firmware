@@ -14,6 +14,9 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: none
+  # No reboot on a Wi-Fi outage (ESPHome's default reboots after 15 min). Climate control is local,
+  # and an external controller's lease expires on its own, so the chamber falls back to SMART anyway.
+  reboot_timeout: 0s
   ap:
     ssid: "Lykyn-Setup"
     password: !secret ap_password
@@ -27,6 +30,11 @@ web_server:
     password: !secret web_password
 
 ota:
+  # An upload blocks the main loop, so nothing could end a mist or a fan pulse during it. Switch
+  # everything off first, and leave EXTERNAL for the SMART fallback in case the upload fails.
+  # Only native OTA: web OTA runs its begin hook on a later loop, so the climate loop could restart
+  # the outputs during the upload (Codex review, 2026-11-23). Updates go through `esphome upload`.
   - platform: esphome
     password: !secret ota_password
-  - platform: web_server
+    on_begin:
+      - script.execute: ota_stop_outputs

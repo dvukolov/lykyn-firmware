@@ -1854,7 +1854,7 @@ export default function Dashboard() {
                       if (!demoMode) void api.setSelect('control_mode', option)
                     }}
                   >
-                    {['SMART', 'MANUAL', 'OFF'].map((option) => (
+                    {['SMART', 'MANUAL', 'OFF', 'EXTERNAL'].map((option) => (
                       <option key={option} value={option}>{option}</option>
                     ))}
                   </select>

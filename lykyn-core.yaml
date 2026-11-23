@@ -13,6 +13,8 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   min_version: 2026.10.0
+  includes:
+    - include/local_control.h
   project:
     name: shroomlabs.lykyn
     version: ${device_version}
@@ -23,6 +25,17 @@ esphome:
           // Fans and mister start OFF. The controller turns them on once it has a good reading.
           id(fan_in_pwm).set_level(0.0f);
           id(fan_out_pwm).set_level(0.0f);
+          // A new boot id tells an external controller that its lease is gone. The chamber never
+          // boots into EXTERNAL: without a lease it runs the SMART fallback.
+          id(boot_id) = random_uint32();
+          if (std::string(id(control_mode).current_option()) == "EXTERNAL") {
+            id(lc_self_change) = true;
+            auto c = id(control_mode).make_call();
+            c.set_option("SMART");
+            c.perform();
+            id(lc_self_change) = false;
+            id(lc_fallback) = true;
+          }
       - lambda: |-
           // One time move to the shared light scale: every light percent is a share of the
           // ring's full output (100 = full), so the master brightness is 100. An older image
@@ -65,7 +78,8 @@ logger:
 
 improv_serial:
 
-captive_portal:
+# captive_portal lives in the setup builds (provision, public) only: it auto-loads web OTA, whose
+# begin hook runs too late to stop the outputs during an upload (Codex review, 2026-11-23).
 
 mdns:
   services:
@@ -82,7 +96,7 @@ mdns:
 time:
   - platform: sntp
     id: sntp_time
-    timezone: America/Los_Angeles
+    timezone: Europe/Madrid
 
 i2c:
   id: bus_a
@@ -143,20 +157,53 @@ globals:
     type: bool
     restore_value: true
     initial_value: 'false'
+  # External control (include/local_control.h): a random id per boot, and a count of valid readings.
+  - id: boot_id
+    type: uint32_t
+    initial_value: '0'
+  - id: sample_seq
+    type: uint32_t
+    initial_value: '0'
+  - id: lc_was_active
+    type: bool
+    initial_value: 'false'
+  # SMART entered by the chamber itself (boot from EXTERNAL, lease expiry, release). Only this SMART, or
+  # EXTERNAL, may be taken over by a controller's lease; an operator's choice clears it. Restored, so a
+  # reboot while in the fallback still lets the controller take over again.
+  - id: lc_fallback
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  # True while the firmware itself changes Control Mode, so on_value can tell it from the operator.
+  - id: lc_self_change
+    type: bool
+    initial_value: 'false'
 
 sensor:
   - platform: sht3xd
     address: 0x44
     i2c_id: bus_a
-    update_interval: 5s
+    # Every second: the mist response is followed closely and an external controller sees each sample.
+    update_interval: 1s
     temperature:
       id: current_temperature
       name: "Current Temperature"
       web_server:
         sorting_group_id: grp_temperature
         sorting_weight: 10
+      filters:
+        # Calibration against a reference thermometer ("Temperature Offset", default -1.0 C).
+        # Stock subtracted 2.5 C and then applied the app's percentage; for our chamber the net was
+        # about -1.0 C. Re-measure after flashing: this firmware may warm the board differently.
+        - lambda: |-
+            const float o = id(temp_offset).state;
+            return std::isnan(o) ? x : x + o;
       on_value:
-        - lambda: 'if (!isnan(x)) id(last_good_ms) = millis();'
+        - lambda: |-
+            if (!isnan(x)) {
+              id(last_good_ms) = millis();
+              id(sample_seq) += 1;
+            }
     humidity:
       id: current_humidity
       name: "Current Humidity"
@@ -282,10 +329,29 @@ select:
     web_server:
       sorting_group_id: grp_system
       sorting_weight: 10
-    options: ["SMART", "MANUAL", "OFF"]
+    # EXTERNAL: an external controller drives the outputs through Controller Command while it holds
+    # the lease. Choosing any other mode here ends it (the operator always wins).
+    options: ["SMART", "MANUAL", "OFF", "EXTERNAL"]
     initial_option: "SMART"
     optimistic: true
     restore_value: true
+    on_value:
+      - lambda: |-
+          const bool ext = x == "EXTERNAL";
+          if (!id(lc_self_change)) id(lc_fallback) = false;   // the operator chose this mode
+          esphome::lykyn::local_control().mode_changed(ext, millis());
+          if (!ext && id(lc_was_active)) {
+            // Leaving EXTERNAL: nothing the controller started may keep running.
+            id(mister_relay).turn_off();
+            id(fan_in_pwm).set_level(0.0f);
+            id(fan_out_pwm).set_level(0.0f);
+          }
+          id(lc_was_active) = ext;
+      # Write the mode and the fallback flag to flash now rather than at the next minutely flush,
+      # so a power cut right after an operator's choice cannot bring back a stale fallback SMART.
+      # 1.5 s: the restoring global queues its save on a 1 s poll, so both are in this flush.
+      - delay: 1500ms
+      - lambda: 'global_preferences->sync();'
   - platform: template
     id: stage
     name: "Stage"
@@ -576,6 +642,87 @@ number:
     restore_value: true
     on_value:
       - script.execute: apply_light
+  # The mister never runs at or above this raw humidity, in any mode. This sensor's readings top out
+  # around 94 (saturation if it runs about 1 C warm); revisit after the salt-bag check.
+  - platform: template
+    id: hard_rh_stop
+    name: "Hard Humidity Stop"
+    web_server:
+      sorting_group_id: grp_humidity
+      sorting_weight: 90
+    unit_of_measurement: "%"
+    min_value: 85
+    max_value: 98
+    step: 0.5
+    initial_value: 94
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: temp_offset
+    name: "Temperature Offset"
+    web_server:
+      sorting_group_id: grp_temperature
+      sorting_weight: 90
+    unit_of_measurement: "°C"
+    min_value: -5
+    max_value: 5
+    step: 0.1
+    initial_value: -1.0
+    optimistic: true
+    restore_value: true
+    entity_category: config
+
+# External controller commands (contract: lykyn-control docs/2026-11-23-local-control-contract.md).
+text:
+  - platform: template
+    id: controller_command
+    name: "Controller Command"
+    web_server:
+      sorting_group_id: grp_hidden
+      sorting_weight: 20
+    mode: text
+    max_length: 255
+    optimistic: false
+    set_action:
+      - lambda: |-
+          auto &lc = esphome::lykyn::local_control();
+          esphome::lykyn::LcInputs in;
+          in.now_ms = millis();
+          const std::string mode(id(control_mode).current_option());
+          in.external = mode == "EXTERNAL";
+          in.off = mode == "OFF";
+          in.rh = id(current_humidity).state;
+          in.fresh = (in.now_ms - id(last_good_ms)) < 10000 && !isnan(in.rh);
+          in.hard_stop = isnan(id(hard_rh_stop).state) ? 94.0f : id(hard_rh_stop).state;
+          in.fallback = mode == "SMART" && id(lc_fallback);
+          in.boot_id = id(boot_id);
+          esphome::lykyn::LcOutputs out;
+          lc.command(x.c_str(), in, out);
+          if (out.enter_external) {
+            id(lc_self_change) = true;
+            auto c = id(control_mode).make_call();
+            c.set_option("EXTERNAL");
+            c.perform();
+            id(lc_self_change) = false;
+            id(lc_fallback) = false;
+          }
+          if (out.enter_fallback) {
+            id(lc_self_change) = true;
+            auto c = id(control_mode).make_call();
+            c.set_option("SMART");
+            c.perform();
+            id(lc_self_change) = false;
+            id(lc_fallback) = true;
+          }
+          if (std::string(id(control_mode).current_option()) == "EXTERNAL") {
+            if (out.mister != id(mister_relay).state) { if (out.mister) id(mister_relay).turn_on(); else id(mister_relay).turn_off(); }
+            id(fan_in_pwm).set_level(out.fan_in);
+            id(fan_out_pwm).set_level(out.fan_out);
+            id(fan_in_level_pct) = out.fan_in * 100.0f;
+            id(fan_out_level_pct) = out.fan_out * 100.0f;
+          }
+      - script.execute: publish_controller_status
 
 text_sensor:
   - platform: wifi_info
@@ -641,6 +788,12 @@ text_sensor:
     web_server:
       sorting_group_id: grp_hidden
       sorting_weight: 10
+  - platform: template
+    id: controller_status
+    name: "Controller Status"
+    web_server:
+      sorting_group_id: grp_hidden
+      sorting_weight: 30
 button:
   - platform: restart
     name: "Restart"
@@ -658,6 +811,35 @@ button:
 
 
 script:
+  - id: ota_stop_outputs
+    mode: single
+    then:
+      - lambda: |-
+          esphome::lykyn::local_control().ota_begin(millis());
+          id(mister_relay).turn_off();
+          id(fan_in_pwm).set_level(0.0f);
+          id(fan_out_pwm).set_level(0.0f);
+          id(fan_in_level_pct) = 0.0f;
+          id(fan_out_level_pct) = 0.0f;
+          if (std::string(id(control_mode).current_option()) == "EXTERNAL") {
+            id(lc_self_change) = true;
+            auto c = id(control_mode).make_call();
+            c.set_option("SMART");
+            c.perform();
+            id(lc_self_change) = false;
+            id(lc_fallback) = true;
+          }
+  - id: publish_controller_status
+    mode: queued
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const float rh = id(current_humidity).state, t = id(current_temperature).state;
+          const uint32_t age = id(last_good_ms) == 0 ? 0xFFFFFFFFu : now - id(last_good_ms);
+          const std::string mode(id(control_mode).current_option());
+          id(controller_status).publish_state(esphome::lykyn::local_control().status(
+              id(boot_id), id(sample_seq), age, rh, t, id(fan_in_level_pct), id(fan_out_level_pct),
+              id(mister_relay).state, mode.c_str(), mode == "SMART" && id(lc_fallback), now));
   - id: apply_light
     mode: restart
     then:
@@ -715,12 +897,16 @@ interval:
           const bool fresh = (now - id(last_good_ms)) < 60000 && !isnan(rh) && !isnan(t);
           const bool smart = id(control_mode).current_option() == "SMART";
           const bool manual = id(control_mode).current_option() == "MANUAL";
+          // In EXTERNAL the controller's jobs own the outputs (the 100 ms interval below); this loop
+          // only keeps the alerts and status texts current.
+          const bool external = id(control_mode).current_option() == "EXTERNAL";
           const float hum_t = id(target_humidity).state;
           const float hum_tol = id(humidity_tolerance).state;
           const float hmin = hum_t - hum_tol, hmax = hum_t + hum_tol;
           const float tt = id(temperature_target).state, ttol = id(temperature_tolerance).state;
           const float tmin = tt - ttol, tmax = tt + ttol;
-          const float HARD_RH = 95.0f;   // absolute stop, whatever the setpoints say
+          // Absolute stop, whatever the setpoints say ("Hard Humidity Stop", default 94).
+          const float HARD_RH = isnan(id(hard_rh_stop).state) ? 94.0f : id(hard_rh_stop).state;
           // Unmeasured stall floor. Stock firmware's first of four levels was 33%.
           // 0 is always off. Values above 0 are lifted to this duty until we measure the real floor.
           const float FAN_STALL_DUTY = 0.33f;
@@ -728,9 +914,14 @@ interval:
           float fan_in = 0.0f, fan_out = 0.0f;
           std::string alerts;
 
-          if (!fresh) {
+          if (external) {
+            id(hum_demand) = false;
+            if (!fresh) alerts = "sensor";
+          } else if (!fresh) {
             alerts = "sensor";
             if (smart || manual) { fan_in = FAN_STALL_DUTY; fan_out = FAN_STALL_DUTY; }  // keep some air moving
+            // A MANUAL mist request ends here too, so it cannot resume unasked when the sensor recovers.
+            if (manual && id(manual_hum)) id(humidifier_manual).turn_off();
             id(hum_demand) = false;
             id(hum_ready) = false;
           } else if (smart) {
@@ -744,8 +935,10 @@ interval:
             const int period_s = (int) (id(fan_period_min).state * 60.0f);
             id(fan_cycle_s) = (id(fan_cycle_s) + 1) % (period_s > 0 ? period_s : 600);
             const bool run = id(fan_cycle_s) < (int) id(fan_run_s).state;
-            if (rh > hmax || t > tmax) id(fan_boost) = true;
-            else if (rh < hmax - 1.0f && t < tmax - 0.5f) id(fan_boost) = false;
+            // Boost on humidity only. The room is the heat source (the chamber runs about 0.4 C above it),
+            // so fans cannot cool it; a boost on temperature only dried the chamber. Temperature stays an alert.
+            if (rh > hmax) id(fan_boost) = true;
+            else if (rh < hmax - 1.0f) id(fan_boost) = false;
             float level = id(fan_boost) ? 1.0f : (run ? id(fan_speed_pct).state / 100.0f : 0.0f);
             // Same stall lift as MANUAL: a running SMART fan below 33% does not spin.
             if (level > 0.0f && level < FAN_STALL_DUTY) level = FAN_STALL_DUTY;
@@ -763,7 +956,13 @@ interval:
 
           if (fresh) {
             if (rh >= hmax && smart) { want_hum = false; id(hum_demand) = false; }
-            if (rh >= HARD_RH) { want_hum = false; id(hum_demand) = false; }
+            if (rh >= HARD_RH) {
+              want_hum = false;
+              id(hum_demand) = false;
+              // In MANUAL a trip at the hard stop ends the request, like the 120 s cap, so a switch
+              // left on cannot keep misting each time humidity falls back below the stop.
+              if (manual && id(manual_hum)) id(humidifier_manual).turn_off();
+            }
             if (rh < hmin) alerts += "rh_low,";
             if (rh > hmax) alerts += "rh_high,";
             if (t < tmin) alerts += "temp_low,";
@@ -771,26 +970,86 @@ interval:
           }
 
           // Mister safety: at most 120 s of demand, then 30 s rest (stock does the same).
+          // In MANUAL the cap also switches the Humidifier off. Before, a switch left on resumed after
+          // the rest, so a lost "off" misted 120 s on, 30 s off for ever. Stock clears its flag the same way.
           if (id(hum_rest_s) > 0) { want_hum = false; id(hum_rest_s)--; }
           else if (want_hum) {
-            if (++id(hum_on_run_s) >= 120) { id(hum_rest_s) = 30; id(hum_on_run_s) = 0; want_hum = false; }
+            if (++id(hum_on_run_s) >= 120) {
+              id(hum_rest_s) = 30;
+              id(hum_on_run_s) = 0;
+              want_hum = false;
+              if (manual && id(manual_hum)) id(humidifier_manual).turn_off();
+            }
           } else id(hum_on_run_s) = 0;
 
           // Mist level: time-proportional pulses in a 10 s window.
           id(mist_tick) = (id(mist_tick) + 1) % 10;
           const int on_s = (int) ceilf(10.0f * id(mist_level).state / 100.0f);
           const bool pulse = want_hum && id(mist_tick) < on_s;
-          if (pulse != id(mister_relay).state) { if (pulse) id(mister_relay).turn_on(); else id(mister_relay).turn_off(); }
-
-          id(fan_in_pwm).set_level(fan_in);
-          id(fan_out_pwm).set_level(fan_out);
-          id(fan_in_level_pct) = fan_in * 100.0f;
-          id(fan_out_level_pct) = fan_out * 100.0f;
+          if (!external) {
+            if (pulse != id(mister_relay).state) { if (pulse) id(mister_relay).turn_on(); else id(mister_relay).turn_off(); }
+            id(fan_in_pwm).set_level(fan_in);
+            id(fan_out_pwm).set_level(fan_out);
+            id(fan_in_level_pct) = fan_in * 100.0f;
+            id(fan_out_level_pct) = fan_out * 100.0f;
+          }
 
           auto pub = [](text_sensor::TextSensor *ts, const std::string &v) { if (ts->state != v) ts->publish_state(v); };
-          pub(id(humidifier_status), pulse ? "ON" : (id(hum_rest_s) > 0 ? "REST" : (want_hum ? "WAIT" : "OFF")));
-          pub(id(air_exchange_status), fan_in > 0.0f ? (id(fan_boost) ? "BOOST" : "ON") : "OFF");
+          if (external) {
+            pub(id(humidifier_status), id(mister_relay).state ? "ON" : "OFF");
+            const bool fans_on = id(fan_in_level_pct) > 0.0f || id(fan_out_level_pct) > 0.0f;
+            pub(id(air_exchange_status), fans_on ? "ON" : "OFF");
+          } else {
+            pub(id(humidifier_status), pulse ? "ON" : (id(hum_rest_s) > 0 ? "REST" : (want_hum ? "WAIT" : "OFF")));
+            pub(id(air_exchange_status), (fan_in > 0.0f || fan_out > 0.0f) ? (id(fan_boost) ? "BOOST" : "ON") : "OFF");
+          }
           pub(id(active_alerts), alerts.empty() ? "none" : alerts);
+
+  # External control: ends jobs on time (100 ms resolution), cuts a mist at the hard stop, expires
+  # the lease and falls back to SMART when the controller goes silent.
+  - interval: 100ms
+    then:
+      - lambda: |-
+          auto &lc = esphome::lykyn::local_control();
+          esphome::lykyn::LcInputs in;
+          in.now_ms = millis();
+          const std::string mode(id(control_mode).current_option());
+          in.external = mode == "EXTERNAL";
+          in.off = mode == "OFF";
+          in.rh = id(current_humidity).state;
+          in.fresh = (in.now_ms - id(last_good_ms)) < 10000 && !isnan(in.rh);
+          in.hard_stop = isnan(id(hard_rh_stop).state) ? 94.0f : id(hard_rh_stop).state;
+          in.fallback = mode == "SMART" && id(lc_fallback);
+          in.boot_id = id(boot_id);
+          const bool was_running = lc.job_running(), was_leased = lc.lease_held();
+          esphome::lykyn::LcOutputs out;
+          lc.tick(in, out);
+          if (out.enter_fallback) {
+            // Lease expired: switch everything off and hand the chamber to the SMART fallback.
+            id(mister_relay).turn_off();
+            id(fan_in_pwm).set_level(0.0f);
+            id(fan_out_pwm).set_level(0.0f);
+            id(fan_in_level_pct) = 0.0f;
+            id(fan_out_level_pct) = 0.0f;
+            id(lc_self_change) = true;
+            auto c = id(control_mode).make_call();
+            c.set_option("SMART");
+            c.perform();
+            id(lc_self_change) = false;
+            id(lc_fallback) = true;
+          } else if (in.external) {
+            if (out.mister != id(mister_relay).state) { if (out.mister) id(mister_relay).turn_on(); else id(mister_relay).turn_off(); }
+            id(fan_in_pwm).set_level(out.fan_in);
+            id(fan_out_pwm).set_level(out.fan_out);
+            id(fan_in_level_pct) = out.fan_in * 100.0f;
+            id(fan_out_level_pct) = out.fan_out * 100.0f;
+          }
+          if (lc.job_running() != was_running || lc.lease_held() != was_leased) id(publish_controller_status).execute();
+
+  # Controller Status once a second, so a silent chamber is noticed within seconds.
+  - interval: 1s
+    then:
+      - script.execute: publish_controller_status
 
   # Grow light schedule. Turn off "Light Enabled" to drive the ring by hand.
   # The ring is also redrawn the moment a light number or the switch changes,

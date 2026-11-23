@@ -11,6 +11,9 @@ packages:
   core: !include lykyn-core.yaml
   web: !include lykyn-web.yaml
 
+# Setup portal for the first Wi-Fi configuration (not in the home build).
+captive_portal:
+
 wifi:
   ap:
     ssid: "Lykyn-Setup"
